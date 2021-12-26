@@ -444,7 +444,7 @@ async def fstop(ctx):
     stop_result = instances_client_factorio.stop(
         project=factorio_project_id, zone='asia-south1-a', instance='factorio')
     reply_stop = discord.Embed()
-    reply_stop.title = "Meincraft Bois"
+    reply_stop.title = "Factorio Bois"
     if (stop_result.error):
         reply_stop.color = discord.Color.red()
         reply_stop.description = stop_result.error.errors[0].message
