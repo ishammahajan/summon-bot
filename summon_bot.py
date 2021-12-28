@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
 import os
+from datetime import datetime, date
 import time
+from zoneinfo import ZoneInfo
 import json
 import re
 from dotenv import load_dotenv
@@ -11,7 +13,12 @@ import random
 import discord
 from discord.ext import commands
 from google.oauth2 import service_account
-from google.cloud import compute_v1
+from google.cloud import compute_v1, firestore
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.jobstores.base import JobLookupError
+sched = AsyncIOScheduler()
+sched.start()
 
 load_dotenv()
 
@@ -413,10 +420,36 @@ async def fstatus(ctx):
 
 @bot.command(name='fstart')
 async def fstart(ctx):
-    start_result = instances_client_factorio.start(
-        project=factorio_project_id, zone='asia-south1-a', instance='factorio')
     reply_start = discord.Embed()
     reply_start.title = "Factorio Bois"
+
+    stats = firestore.Client().collection('servers').document('factorio').get()
+    if not stats.exists:
+        firestore.Client().collection('servers').document('factorio').set({
+            'time_played': 0,
+            'date_tracked': datetime.now(ZoneInfo('Asia/Kolkata')),
+        })
+        time_played = 0
+        date_tracked = datetime.now(ZoneInfo('Asia/Kolkata'))
+    else:
+        time_played = stats.to_dict()['time_played']
+        date_tracked = stats.to_dict()['date_tracked'].astimezone(ZoneInfo('Asia/Kolkata'))
+    today = datetime.now(ZoneInfo('Asia/Kolkata'))
+    if (date(today.year, today.month, today.day) - date(date_tracked.year, date_tracked.month, date_tracked.day)).days != 0:
+        firestore.Client().collection('servers').document('factorio').set({
+            'time_played': 0,
+            'date_tracked': datetime.now(ZoneInfo('Asia/Kolkata')),
+        })
+        time_played = 0
+        date_tracked = datetime.now(ZoneInfo('Asia/Kolkata'))
+    if time_played == 120:
+        reply_start.color = discord.Color.red()
+        reply_start.description = "You have reached the maximum time limit of 2 hours."
+        await ctx.send(embed=reply_start)
+        return
+
+    start_result = instances_client_factorio.start(
+        project=factorio_project_id, zone='asia-south1-a', instance='factorio')
     if (start_result.error):
         reply_start.color = discord.Color.red()
         reply_start.description = start_result.error.errors[0].message
@@ -432,15 +465,27 @@ async def fstart(ctx):
         time.sleep(5)
         operation_start = operation_status_factorio(start_result.id)
 
+    sched.add_job(
+        func=factorio_addiction_control,
+        args=[ctx],
+        trigger='interval',
+        minutes=1,
+        id='factorio_addiction_control',
+        replace_existing=True)
+
     reply_start.color = discord.Color.green()
     reply_start.description = "Server started!"
-
     await ctx.send(embed=reply_start)
     await fstatus(ctx)
 
 
 @bot.command(name='fstop')
 async def fstop(ctx):
+    try:
+        sched.remove_job('factorio_addiction_control')
+    except JobLookupError:
+        pass
+
     stop_result = instances_client_factorio.stop(
         project=factorio_project_id, zone='asia-south1-a', instance='factorio')
     reply_stop = discord.Embed()
@@ -469,6 +514,30 @@ async def fstop(ctx):
 def operation_status_factorio(operation):
     return operations_client_factorio.get(
         project=factorio_project_id, zone='asia-south1-a', operation=operation)
+
+
+async def factorio_addiction_control(ctx):
+    stats = firestore.Client().collection('servers').document('factorio').get()
+    time_played = stats.to_dict()['time_played'] + 1
+    factorio_role_id_list = [role.mention for role in ctx.guild.roles if role.name == 'factorio']
+    factorio_role_id = factorio_role_id_list[0] if len(factorio_role_id_list) > 0 else 'Factorio Bois'
+    if time_played == 120 - 5:
+        await ctx.send(f"{factorio_role_id}, you have 5 minutes of playtime remaining.")
+    elif time_played == 120 - 10:
+        await ctx.send(f"{factorio_role_id}, you have 10 minutes of playtime remaining.")
+    elif time_played == 120 - 15:
+        await ctx.send(f"{factorio_role_id}, you have 15 minutes of playtime remaining.")
+    if time_played == 120:
+        await ctx.send(f"{factorio_role_id}, stopping the server now.")
+        firestore.Client().collection('servers').document('factorio').update({
+            'time_played': 120,
+        })
+        await fstop(ctx)
+        sched.remove_job('factorio_addiction_control')
+        return
+    firestore.Client().collection('servers').document('factorio').update({
+        'time_played': firestore.Increment(1),
+    })
 
 
 bot.run(BOT_TOKEN)
